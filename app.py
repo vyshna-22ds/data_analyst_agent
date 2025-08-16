@@ -1,4 +1,7 @@
 # app.py
+import math
+import numpy as np
+import pandas as pd
 import io, json, time, shutil, tempfile, re, logging, os, traceback
 from typing import List, Dict, Any, Optional
 
@@ -34,6 +37,43 @@ app.add_middleware(
 
 # --- NEW: max upload size guard (default 100 MB; override via env MAX_UPLOAD_MB) ---
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
+
+def _json_sanitize(obj):
+    """
+    Recursively replace NaN/±Inf with None so JSONResponse never crashes.
+    Handles floats, numpy scalars/arrays, pandas Series/DataFrames, lists, dicts.
+    """
+    # floats
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    # numpy scalars
+    if isinstance(obj, (np.floating, np.integer)):
+        val = float(obj) if isinstance(obj, np.floating) else int(obj)
+        if isinstance(val, float) and not math.isfinite(val):
+            return None
+        return val
+    # numpy arrays
+    if isinstance(obj, np.ndarray):
+        if np.issubdtype(obj.dtype, np.number):
+            arr = obj.astype(float)
+            arr[~np.isfinite(arr)] = np.nan
+            return [None if (isinstance(x, float) and not math.isfinite(x)) or (x != x) else x for x in arr]
+        return obj.tolist()
+    # pandas
+    if isinstance(obj, pd.DataFrame):
+        safe = obj.replace([np.inf, -np.inf], np.nan)
+        recs = safe.where(pd.notnull(safe), None).to_dict(orient="records")
+        return [_json_sanitize(r) for r in recs]
+    if isinstance(obj, pd.Series):
+        safe = obj.replace([np.inf, -np.inf], np.nan)
+        return [_json_sanitize(x) for x in safe.where(pd.notnull(safe), None).tolist()]
+    # containers
+    if isinstance(obj, dict):
+        return {k: _json_sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_sanitize(x) for x in obj]
+    return obj
+
 
 @app.middleware("http")
 async def _limit_upload_size(request: Request, call_next):
@@ -288,4 +328,7 @@ async def api(request: Request):
     except Exception:
         pass
 
-    return JSONResponse(jsonable_encoder(kv_answers if out_format == "object" else answers))
+    payload = kv_answers if out_format == "object" else answers
+    payload = _json_sanitize(payload)
+    return JSONResponse(jsonable_encoder(payload))
+
