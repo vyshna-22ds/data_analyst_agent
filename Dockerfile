@@ -29,3 +29,8 @@ EXPOSE 7860
 
 # Start Uvicorn with multiple workers
 CMD ["bash", "-lc", "uvicorn app:app --host ${HOST} --port ${PORT} --workers ${WORKERS} --timeout-keep-alive 65"]
+
+# Dockerfile snippet
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir networkx==2.8.8
+
