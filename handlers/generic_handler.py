@@ -1,8 +1,12 @@
-import os, io, re, json, pandas as pd
+# handlers/generic_handler.py
+import os, io, re, json, math, logging
 from typing import Dict, Any, List, Optional
+
+import numpy as np
+import pandas as pd
+
 from utils.plots import scatter, line, bar, pie, hist
 from utils.io import data_uri_png
-import logging
 
 log = logging.getLogger("uvicorn")
 
@@ -17,6 +21,44 @@ FILENAME_RE = re.compile(
         )""",
     re.IGNORECASE | re.VERBOSE,
 )
+
+# ---------------------- JSON-SAFE HELPERS ---------------------- #
+def _safe_float(x):
+    """Return a JSON-safe float or None if NaN/Inf/invalid."""
+    try:
+        f = float(x)
+        return f if math.isfinite(f) else None
+    except Exception:
+        return None
+
+def _df_json_safe(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Convert DataFrame to list-of-dicts with NaN/Inf -> None.
+    Also converts pandas.Timestamp to ISO8601 strings.
+    """
+    # Replace inf with NaN, then turn NaN into None
+    df2 = df.replace([np.inf, -np.inf], np.nan)
+    # Convert datetimes to ISO strings (avoids non-serializable Timestamps)
+    for c in df2.columns:
+        if pd.api.types.is_datetime64_any_dtype(df2[c]):
+            df2[c] = df2[c].dt.tz_localize(None, nonexistent='shift_forward', ambiguous='NaT').astype('datetime64[ns]')
+            df2[c] = df2[c].dt.strftime('%Y-%m-%dT%H:%M:%S')
+    # Final None conversion
+    df2 = df2.where(pd.notnull(df2), None)
+    return df2.to_dict(orient="records")
+
+def _series_list_safe(s: pd.Series) -> List[Any]:
+    """Series -> list with NaN/Inf -> None."""
+    s2 = s.replace([np.inf, -np.inf], np.nan)
+    s2 = s2.where(pd.notnull(s2), None)
+    return s2.tolist()
+
+def _coerce_numeric_inplace(df: pd.DataFrame, col: str) -> None:
+    try:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    except Exception:
+        pass
+# --------------------------------------------------------------- #
 
 
 def _list_files(attachments_dir: str) -> List[str]:
@@ -50,7 +92,7 @@ def _late_rescan(attachments_dir: str) -> List[str]:
 def _prefer_from_question(question: str, files: List[str]) -> Optional[str]:
     """If the question mentions a specific filename, prefer that."""
     if not files:
-        return None    # avoid touching files when empty
+        return None  # avoid touching files when empty
     s = (question or "").lower()
     m = FILENAME_RE.search(s)
     if not m:
@@ -112,8 +154,7 @@ def _try_parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     obj_cols = df.select_dtypes(include=["object"]).columns.tolist()
     for c in obj_cols[:2]:
         try:
-            # no errors= to avoid future deprecation; safe-guard with try/except
-            df[c] = pd.to_datetime(df[c])
+            df[c] = pd.to_datetime(df[c], errors="coerce")
         except Exception:
             pass
     return df
@@ -125,7 +166,7 @@ def _choose_numeric(df: pd.DataFrame) -> List[str]:
         # coerce first non-numeric if possible
         try:
             col = df.columns[1]
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            _coerce_numeric_inplace(df, col)
             nums = df.select_dtypes(include="number").columns.tolist()
         except Exception:
             pass
@@ -181,16 +222,18 @@ def handle(question: str, attachments_dir: str) -> Dict[str, Any]:
 
     log.info(f"[generic] chosen target={target}")
 
+    # Load & clean
     df = _load_table(target)
     df = _try_parse_dates(df).copy()
+    # Replace inf with NaN to sanitize later
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
     # Build a JSON-safe head with ISO dates
-    head_json = df.head(10).to_json(orient="records", date_format="iso")
     out: Dict[str, Any] = {
         "file": os.path.basename(target),
         "rows": int(len(df)),
         "cols": list(map(str, df.columns)),
-        "head": json.loads(head_json),  # parsed JSON => plain Python types (no Timestamps)
+        "head": _df_json_safe(df.head(10)),
     }
 
     # --- Plot heuristic ---
@@ -224,23 +267,24 @@ def handle(question: str, attachments_dir: str) -> Dict[str, Any]:
     except Exception as e:
         out["plot_error"] = str(e)
 
-    # Optional quick stats if the question mentions common terms
+    # Optional quick stats if the question mentions common terms (JSON-safe)
     try:
         lc = s
         num_cols = df.select_dtypes(include="number").columns
         if ("average" in lc or "mean" in lc) and len(num_cols):
             out["numeric_means"] = {
-                c: float(pd.to_numeric(df[c], errors="coerce").mean()) for c in num_cols[:5]
+                c: _safe_float(pd.to_numeric(df[c], errors="coerce").mean()) for c in num_cols[:5]
             }
         if ("correlation" in lc or "corr" in lc) and len(num_cols) >= 2:
-            out["pairwise_corr"] = float(df[num_cols[:2]].corr().iloc[0, 1])
+            corr_val = df[num_cols[:2]].corr().iloc[0, 1]
+            out["pairwise_corr"] = _safe_float(corr_val)
         if any(w in lc for w in ("min", "maximum", "max ")):
             if len(num_cols):
                 out["numeric_min"] = {
-                    c: float(pd.to_numeric(df[c], errors="coerce").min()) for c in num_cols[:5]
+                    c: _safe_float(pd.to_numeric(df[c], errors="coerce").min()) for c in num_cols[:5]
                 }
                 out["numeric_max"] = {
-                    c: float(pd.to_numeric(df[c], errors="coerce").max()) for c in num_cols[:5]
+                    c: _safe_float(pd.to_numeric(df[c], errors="coerce").max()) for c in num_cols[:5]
                 }
     except Exception:
         pass
