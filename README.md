@@ -1,4 +1,4 @@
-# Data Analyst Agent — Submission Ready
+# Data Analyst Agent 
 
 **Endpoint:** `POST /api/` (FastAPI)  
 **Input:** multipart with required `questions.txt` and optional attachments (CSV/JSON/PNG/Parquet, etc.)  
