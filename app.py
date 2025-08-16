@@ -14,6 +14,12 @@ from utils.io import load_questions_from_text, detect_output_format
 from utils.timer import Deadline
 from dispatcher import route
 from handlers import wikipedia_handler, duckdb_handler, generic_handler
+from handlers import network_handler
+
+# ...
+if tag == "network":
+    res = network_handler.handle(q, attachments_dir)
+
 
 # Optional: pattern-based matcher for Indian High Court via S3 parquet
 try:
