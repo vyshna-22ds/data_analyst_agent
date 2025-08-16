@@ -1,4 +1,6 @@
 # app.py
+import os
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 import math
 import numpy as np
 import pandas as pd
