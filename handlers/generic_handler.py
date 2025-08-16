@@ -452,7 +452,8 @@ def _apply_ops(df: pd.DataFrame, question: str) -> Dict[str, Any]:
     return out
 
 # ----------------------- main handler -----------------------
-def handle(question: str, attachments_dir: str) -> Dict[str, Any]:
+# ----------------------- main handler (core) -----------------------
+def _handle_core(question: str, attachments_dir: str) -> Dict[str, Any]:
     log.info(f"[generic] attachments_dir={attachments_dir}")
     files = _list_files(attachments_dir)
     log.info(f"[generic] files(initial)={files}")
@@ -573,3 +574,39 @@ def handle(question: str, attachments_dir: str) -> Dict[str, Any]:
         pass
 
     return sanitize(out)
+
+# keep your earlier helper
+def handle_response(question: str, attachments_dir: str):
+    cleaned = sanitize(_handle_core(question, attachments_dir))
+    return JSONResponse(content=cleaned)
+
+# ----------------------- compatibility entrypoint -----------------------
+def handle(*args, **kwargs):
+    """
+    Compatible with both:
+      1) handle(question: str, attachments_dir: str)
+      2) handle(attachments_dir: str, files: list[str] | None, form_text: str | None)
+         (some routers pass (attachments_dir, files, form_text))
+    Returns a plain dict (sanitized).
+    """
+    # Keyword-style call
+    if "question" in kwargs and "attachments_dir" in kwargs:
+        return _handle_core(kwargs["question"], kwargs["attachments_dir"])
+
+    # Positional-style dispatch
+    if len(args) == 2 and isinstance(args[0], str) and isinstance(args[1], str):
+        # (question, attachments_dir)
+        return _handle_core(args[0], args[1])
+
+    if len(args) >= 1 and isinstance(args[0], str) and os.path.isdir(args[0]):
+        # (attachments_dir, [files], [form_text])
+        attachments_dir = args[0]
+        form_text = ""
+        if len(args) >= 3 and isinstance(args[2], str):
+            form_text = args[2]
+        # try to extract a question from form_text if present; else use a generic prompt
+        question = form_text or "Analyze the attached data."
+        return _handle_core(question, attachments_dir)
+
+    # Fallback if the router mis-called us
+    raise TypeError("generic_handler.handle called with unexpected signature")
