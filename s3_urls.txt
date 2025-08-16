@@ -1,0 +1,2 @@
+https://s3.ap-south-1.amazonaws.com/indian-high-court-judgments/metadata/parquet/year=2021/court=33_10/bench=mdubench/metadata.parquet
+https://s3.ap-south-1.amazonaws.com/indian-high-court-judgments/metadata/parquet/year=2022/court=33_10/bench=mdubench/metadata.parquet

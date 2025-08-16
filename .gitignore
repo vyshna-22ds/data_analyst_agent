@@ -1,0 +1,30 @@
+Set-Content -Path .gitignore -Value @'
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.log
+
+# Envs
+.venv/
+venv/
+env/
+ENV/
+*.env
+.env.*
+
+# Jupyter/OS
+.ipynb_checkpoints/
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Builds / caches
+dist/
+build/
+.cache/
+'@
