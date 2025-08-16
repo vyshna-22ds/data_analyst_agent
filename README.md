@@ -1,3 +1,17 @@
+---
+title: Data Analyst Agent
+emoji: 🧮
+colorFrom: indigo
+colorTo: gray
+sdk: docker
+app_file: app.py
+pinned: false
+---
+
+# Data Analyst Agent
+
+FastAPI app exposing `/api/`, `/health`, and `/debug/echo`.
+
 # Data Analyst Agent 
 
 **Endpoint:** `POST /api/` (FastAPI)  
