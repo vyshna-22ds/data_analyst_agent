@@ -1,16 +1,17 @@
 # app.py
 import os
 os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
+
 import math
 import numpy as np
 import pandas as pd
-import io, json, time, shutil, tempfile, re, logging, os, traceback
+import io, json, time, shutil, tempfile, re, logging, traceback
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.encoders import jsonable_encoder
-from fastapi.middleware.cors import CORSMiddleware  # NEW: CORS
+from fastapi.middleware.cors import CORSMiddleware
 
 from utils.io import load_questions_from_text, detect_output_format
 from utils.timer import Deadline
@@ -28,7 +29,7 @@ log = logging.getLogger("uvicorn")
 
 app = FastAPI(title="Data Analyst Agent", version="3.3.3")
 
-# --- NEW: permissive CORS (handy for browser/manual tests) ---
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,8 +38,9 @@ app.add_middleware(
     max_age=3600,
 )
 
-# --- NEW: max upload size guard (default 100 MB; override via env MAX_UPLOAD_MB) ---
+# --- Max upload size (default 100 MB) ---
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024
+
 
 def _json_sanitize(obj):
     """
@@ -59,7 +61,10 @@ def _json_sanitize(obj):
         if np.issubdtype(obj.dtype, np.number):
             arr = obj.astype(float)
             arr[~np.isfinite(arr)] = np.nan
-            return [None if (isinstance(x, float) and not math.isfinite(x)) or (x != x) else x for x in arr]
+            return [
+                None if (isinstance(x, float) and not math.isfinite(x)) or (x != x) else x
+                for x in arr
+            ]
         return obj.tolist()
     # pandas
     if isinstance(obj, pd.DataFrame):
@@ -88,9 +93,9 @@ async def _limit_upload_size(request: Request, call_next):
                 status_code=413,
             )
     except Exception:
-        # Malformed or missing header -> continue; server/proxy may still enforce limits
         pass
     return await call_next(request)
+
 
 @app.get("/")
 def root():
@@ -98,12 +103,12 @@ def root():
         "OK. POST /api/ with multipart including questions.txt (required) and any attachments."
     )
 
-# --- NEW: simple health check for uptime/retries ---
+
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# Always respond with JSON on unexpected errors
+
 @app.exception_handler(Exception)
 async def all_exception_handler(request: Request, exc: Exception):
     traceback.print_exc()
@@ -112,11 +117,11 @@ async def all_exception_handler(request: Request, exc: Exception):
         content={"error": "internal_error", "detail": str(exc)},
     )
 
-# Tiny helper to inspect what arrived (very helpful in Windows + curl.exe)
+
 @app.post("/debug/echo")
 async def debug_echo(request: Request):
     form = await request.form()
-    items = list(form.multi_items())  # cache iterator
+    items = list(form.multi_items())
     out = []
     for k, v in items:
         if hasattr(v, "filename"):
@@ -131,6 +136,7 @@ async def debug_echo(request: Request):
         else:
             out.append({"key": k, "type": type(v).__name__, "value_sample": str(v)[:120]})
     return JSONResponse(jsonable_encoder({"received": out}))
+
 
 @app.post("/api/")
 async def api(request: Request):
@@ -163,6 +169,7 @@ async def api(request: Request):
     saved_files: List[str] = []
     saved_questions_path: Optional[str] = None
     questions_text_inline: Optional[str] = None
+    return_mode: Optional[str] = None  # "answers"|"object"|"json" -> answers-only
 
     # Save all uploads (duck-typed: any object with .filename is treated as a file)
     for key, value in items:
@@ -209,8 +216,10 @@ async def api(request: Request):
             # Accept inline text fields as questions too
             if str(key).lower() in {"questions", "q", "prompt"} and isinstance(value, str) and value.strip():
                 questions_text_inline = value
+            # answers-only switch (optional)
+            if str(key).lower() in {"return_mode", "answers_only", "format"} and isinstance(value, str) and value.strip():
+                return_mode = value.strip().lower()
 
-    # Helpful debug
     log.info(f"Saved attachments: {saved_files}")
 
     # Smart fallbacks for questions
@@ -241,7 +250,19 @@ async def api(request: Request):
 
     # ---- Normal flow from here ----
     qs = load_questions_from_text(raw)
-    out_format = detect_output_format(raw)
+
+    # Force answers-only JSON by default; caller can still override via return_mode.
+    out_format = "object"
+    # If someone insists on legacy behavior, they can embed a rubric; we allow override via return_mode.
+    if return_mode in {"answers", "object", "json"}:
+        out_format = "object"
+    elif return_mode in {"array", "list"}:
+        out_format = "array"
+    else:
+        # If you prefer to respect embedded rubric when no return_mode passed, uncomment:
+        # out_format = detect_output_format(raw)
+        pass
+
     s = raw.lower()
 
     # 1) Highest-grossing films (strict array of 4)
@@ -253,6 +274,7 @@ async def api(request: Request):
             try:
                 shutil.rmtree(workdir, ignore_errors=True)
             finally:
+                # This task explicitly expects an array of 4 answers.
                 return JSONResponse(jsonable_encoder([int(c), str(earliest), float(corr), img]))
         except Exception as e:
             try:
@@ -280,7 +302,6 @@ async def api(request: Request):
             os.path.exists(os.path.join(attachments_dir, "s3_urls.txt")),
         )
         try:
-            # Pass attachments_dir so s3_urls.txt can be used if uploaded
             ans = duckdb_handler._indian_high_court_answers(attachments_dir=attachments_dir)
             try:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -296,7 +317,7 @@ async def api(request: Request):
                 }))
 
     # 4) Generalized processing (fallback)
-    answers: List[Any] = []
+    answers_array: List[Any] = []
     kv_answers: Dict[str, Any] = {}
 
     for q in qs:
@@ -305,7 +326,7 @@ async def api(request: Request):
             if out_format == "object":
                 kv_answers[q] = note
             else:
-                answers.append(note)
+                answers_array.append(note)
             break
 
         try:
@@ -322,15 +343,14 @@ async def api(request: Request):
         if out_format == "object":
             kv_answers[q] = res
         else:
-            # For array outputs, keep items as strings for simple rubric compliance
-            answers.append(json.dumps(res, ensure_ascii=False))
+            # Return real JSON values (not stringified blobs)
+            answers_array.append(res)
 
     try:
         shutil.rmtree(workdir, ignore_errors=True)
     except Exception:
         pass
 
-    payload = kv_answers if out_format == "object" else answers
+    payload = kv_answers if out_format == "object" else answers_array
     payload = _json_sanitize(payload)
     return JSONResponse(jsonable_encoder(payload))
-
