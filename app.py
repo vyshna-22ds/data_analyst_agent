@@ -176,6 +176,8 @@ async def api(request: Request):
     # Generalized processing
     answers: List[Any] = []
     kv_answers: Dict[str, Any] = {}
+    # NEW: track the last dict result we produce (so we can return exactly that)
+    last_obj_res: Optional[Dict[str, Any]] = None
 
     for q in qs:
         if deadline.nearly_out():
@@ -199,6 +201,10 @@ async def api(request: Request):
 
         res = _prune_nonanswer(res)
 
+        # Record last object-like answer
+        if isinstance(res, dict):
+            last_obj_res = res
+
         if out_format == "object":
             kv_answers[q] = res
         else:
@@ -206,11 +212,14 @@ async def api(request: Request):
 
     shutil.rmtree(workdir, ignore_errors=True)
 
-    # Flatten single-object results
+    # Flatten single-object results, preferring the last dict result.
     if out_format == "object":
-        if len(kv_answers) == 1 and isinstance(next(iter(kv_answers.values())), dict):
+        if last_obj_res is not None:
+            payload = last_obj_res
+        elif len(kv_answers) == 1 and isinstance(next(iter(kv_answers.values())), dict):
             payload = next(iter(kv_answers.values()))
         else:
+            # Fallback: return the mapping (rare)
             payload = kv_answers
     else:
         payload = answers
