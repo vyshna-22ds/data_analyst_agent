@@ -3,6 +3,7 @@ os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 import math
 import numpy as np
 import pandas as pd
+import re
 import io, json, time, shutil, tempfile, logging, traceback
 from typing import List, Dict, Any, Optional
 
@@ -15,6 +16,7 @@ from utils.io import load_questions_from_text, detect_output_format
 from utils.timer import Deadline
 from dispatcher import route
 from handlers import wikipedia_handler, duckdb_handler, generic_handler
+from handlers import sales_handler, network_handler
 
 try:
     from pattern_matchers import indian_courts
@@ -63,6 +65,22 @@ def _json_sanitize(obj):
         return [_json_sanitize(x) for x in obj]
     return obj
 
+def _extract_required_keys_from_prompt(raw_text: str) -> Optional[set]:
+    """
+    Finds keys listed in a 'Return a JSON object with keys:' section, e.g.
+      - `total_sales`
+      - `top_region`
+    Returns a set of key names, or None if not present.
+    """
+    s = raw_text
+    m = re.search(r"Return a JSON object with keys:(.*?)(?:\n\s*\n|$)", s, flags=re.IGNORECASE|re.DOTALL)
+    if not m:
+        return None
+    block = m.group(1)
+    keys = set(re.findall(r"`([A-Za-z0-9_]+)`", block))
+    return keys or None
+
+
 def _prune_nonanswer(obj):
     """Remove non-answer noise (file, preview, debug)."""
     DROP = {"file", "preview", "attachments", "attached", "_debug", "raw", "table_preview"}
@@ -75,57 +93,60 @@ def _prune_nonanswer(obj):
 def _is_nonempty_dict(d: Any) -> bool:
     return isinstance(d, dict) and bool(d) and any(v is not None for v in d.values())
 
-def _pick_final_object(
-    raw_text: str,
-    per_q_results: List[Any],
-    kv_answers: Dict[str, Any],
-    out_format: str
-) -> Any:
+def _pick_final_object(raw_text: str, per_q_results: List[Any], kv_answers: Dict[str, Any], out_format: str) -> Any:
     """
-    Choose the single best JSON object to return:
-      1) If an object contains all required weather keys, return that.
-      2) Else return the last non-empty dict.
-      3) Else return the dict with the most keys.
-      4) Else fall back to previous behavior (single dict flatten or kv mapping / list).
+    Selection priority:
+      (A) If prompt contains 'Return a JSON object with keys:' -> pick dict with EXACTLY those keys.
+      (B) Else if it matches weather keys (legacy fast-path), return that.
+      (C) Else return the last non-empty dict.
+      (D) Else dict with most keys.
+      (E) Else fall back to legacy behavior.
     """
-    required_keys = {
+    required_keys_weather = {
         "average_temp_c", "max_precip_date", "min_temp_c",
         "temp_precip_correlation", "average_precip_mm",
         "temp_line_chart", "precip_histogram"
     }
+    candidates = [d for d in per_q_results if isinstance(d, dict)]
 
-    # Collect candidates (keep order)
-    candidates: List[Dict[str, Any]] = []
-    for res in per_q_results:
-        if isinstance(res, dict):
-            candidates.append(res)
+    # (A) Exact-key match from prompt
+    required_from_prompt = _extract_required_keys_from_prompt(raw_text)
+    if required_from_prompt:
+        for d in reversed(candidates):  # prefer later
+            ks = set(d.keys())
+            if ks == required_from_prompt:
+                return d
+        # allow superset fallback if no exact match
+        for d in reversed(candidates):
+            if required_from_prompt.issubset(set(d.keys())):
+                # strip extras to be safe
+                return {k: d[k] for k in required_from_prompt}
 
-    # 1) Prefer dict containing all required keys (common eval case)
-    for d in reversed(candidates):  # prefer last such dict
+    # (B) Weather fast-path (unchanged)
+    for d in reversed(candidates):
         try:
-            if required_keys.issubset(set(d.keys())):
+            if required_keys_weather.issubset(set(d.keys())):
                 return d
         except Exception:
             pass
 
-    # 2) Last non-empty dict
+    # (C) Last non-empty dict
     for d in reversed(candidates):
         if _is_nonempty_dict(d):
             return d
 
-    # 3) Dict with most keys
+    # (D) Dict with most keys
     if candidates:
         best = max(candidates, key=lambda x: len(x.keys()))
         if best:
             return best
 
-    # 4) Fallback to legacy behavior
+    # (E) Fallback to legacy behavior
     if out_format == "object":
         if len(kv_answers) == 1 and isinstance(next(iter(kv_answers.values())), dict):
             return next(iter(kv_answers.values()))
         return kv_answers
     else:
-        # If we got exactly one dict result in a list, flatten it
         only_dicts = [x for x in per_q_results if isinstance(x, dict)]
         if len(only_dicts) == 1:
             return only_dicts[0]
@@ -255,6 +276,10 @@ async def api(request: Request):
                 res = wikipedia_handler.handle(q)
             elif tag == "duckdb":
                 res = duckdb_handler.handle(q, attachments_dir)
+            elif tag == "sales":                    # <-- add
+                res = sales_handler.handle(q, attachments_dir)
+            elif tag == "network":                  # <-- add
+                res = network_handler.handle(q, attachments_dir)
             else:
                 res = generic_handler.handle(q, attachments_dir)
         except Exception as e:

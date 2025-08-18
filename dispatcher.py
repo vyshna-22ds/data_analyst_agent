@@ -1,49 +1,43 @@
 # dispatcher.py
 from typing import Dict, Any
-from handlers import generic_handler, wikipedia_handler, duckdb_handler
-from handlers import network_handler
-from handlers import sales_handler  # <-- add this
 
-def route(question: str) -> str:
-    s = (question or "").lower()
-
-    if "wikipedia" in s or "https://en.wikipedia.org" in s:
-        return "wikipedia"
-
-    if (("select " in s and " from " in s)
-        or "duckdb" in s
-        or "read_parquet(" in s
-        or "read_csv_auto(" in s):
-        return "duckdb"
-
-    # sales (match both file-name and task words)
-    if any(k in s for k in [
-        "sample-sales.csv", "sales.csv", "total_sales",
-        "top_region", "median_sales", "sales tax", "cumulative_sales",
-        "analyze `sample-sales.csv`", "analyze `sales.csv`"
-    ]):
-        return "sales"
-
-    # network / graph
-    if any(k in s for k in [
-        "edges.csv", "network", "graph", "degree", "centrality",
-        "density", "shortest_path", "betweenness", "closeness",
-        "pagerank", "connected components", "communities"
-    ]):
+# dispatcher.py
+def route(q: str) -> str:
+    s = q.lower()
+    if "use the undirected network" in s or "degree_histogram" in s or "edges.csv" in s:
         return "network"
-
+    if "analyze" in s and "sales" in s or "sample-sales.csv" in s or "cumulative sales" in s:
+        return "sales"
+    if "wikipedia" in s:
+        return "wikipedia"
+    if "duckdb" in s or "read_parquet" in s:
+        return "duckdb"
     return "generic"
 
+
 def dispatch(question: str, attachments_dir: str) -> Dict[str, Any]:
+    """
+    Dispatch to the routed handler and return its result dict.
+    Lazy-import handlers here to avoid circular imports at module import time.
+    """
     tag = route(question)
 
     if tag == "wikipedia":
+        from handlers import wikipedia_handler
         return wikipedia_handler.handle(question, attachments_dir)
+
     if tag == "duckdb":
+        from handlers import duckdb_handler
         return duckdb_handler.handle(question, attachments_dir)
+
     if tag == "sales":
-        return sales_handler.handle(question, attachments_dir)     # <-- add
+        from handlers import sales_handler
+        return sales_handler.handle(question, attachments_dir)
+
     if tag == "network":
+        from handlers import network_handler
         return network_handler.handle(question, attachments_dir)
 
+    # default
+    from handlers import generic_handler
     return generic_handler.handle(question, attachments_dir)
