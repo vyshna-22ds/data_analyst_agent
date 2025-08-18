@@ -1,4 +1,4 @@
-# CURRENT_PROJECT/handlers/sales_handler.py
+#sales_handler.py
 from __future__ import annotations
 
 import io
